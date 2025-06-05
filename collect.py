@@ -1,184 +1,160 @@
 from openai import OpenAI
 from dotenv import load_dotenv
-
-import ast
 import time
 import json
-import re
 
 load_dotenv()
 
-# Load system prompts
+# 1. 시스템 프롬프트 불러오기
 with open("make_SFT_prompt.txt", 'r', encoding='utf-8') as f:
     make_SFT_prompt = f.read()
-
-with open("make_DPO_prompt.txt", 'r', encoding='utf-8') as f:
-    make_DPO_prompt = f.read()
 
 with open("SFT_check_prompt.txt", 'r', encoding='utf-8') as f:
     SFT_check_prompt = f.read()
 
-with open("DPO_check_prompt.txt", 'r', encoding='utf-8') as f:
+with open("make_DPO_prompt.txt", 'r', encoding='utf-8') as f:
+    make_DPO_prompt = f.read()
+
+with open("DPO_check_prompt.txt", 'r' ,encoding='utf-8') as f:
     DPO_check_prompt = f.read()
 
-# Initialize clients
-sft_generator = OpenAI()
-sft_checker = OpenAI()
-dpo_generator = OpenAI()
-dpo_checker = OpenAI()
-gen_quest = OpenAI()
+# 2. OpenAI 클라이언트 초기화
+generater = OpenAI()
+checker = OpenAI()
 
-# 저장용 리스트 및 질문 집합
-questions = []
+dpo_generater = OpenAI()
+dpo_checker = OpenAI()
+
+# 3. 결과 저장 리스트 및 기존 질문 집합
+results = []
 existing_questions = set()
 
-# 수집할 데이터 개수
-num_of_data = 5
+collect_num = 5
 
-# 질문 생성
-while len(questions) < num_of_data:
+# 4. 기존 질문 초기화 함수 (불러온 기존 데이터가 있을 경우)
+def initialize_existing_questions(results):
+    for item in results:
+        for msg in item["messages"]:
+            if msg["role"] == "user":
+                existing_questions.add(msg["content"].strip())
+
+# 5. 중복 질문 제거 함수
+def filter_duplicates(existing_questions, items):
+    valid_items = []
+    for item in items:
+        user_msg = next((m for m in item["messages"] if m["role"] == "user"), None)
+        if user_msg and user_msg["content"].strip() not in existing_questions:
+            valid_items.append(item)
+    return valid_items
+
+# 6. 생성 루프
+while len(results) < collect_num:
     try:
-        gen_quest_msg = [
-            {"role": "system", "content": "당신은 특정 인물에게 할 질문을 생성하는 질문 생성기입니다. 질문은 파이썬의 리스트 형태로 저장할 수 있도록 생성해주세요 (ex. ['질문 1','질문 2'])"},
-            {"role": "user", "content": "조세호에게 할 질문 5개를 생성해주세요"}
-        ]
-        gen_question = gen_quest.chat.completions.create(
-            model='gpt-4o-mini',
-            messages=gen_quest_msg
-        )
-        try:
-            new_qs = ast.literal_eval(gen_question.choices[0].message.content)
-        except Exception:
-            raw = gen_question.choices[0].message.content.replace("[", "").replace("]", "")
-            new_qs = [q.strip().strip("'\"") for q in raw.split(",") if q.strip()]
-
-        for q in new_qs:
-            q_clean = q.strip()
-            if q_clean and q_clean not in existing_questions:
-                questions.append(q_clean)
-                existing_questions.add(q_clean)
-        
-    except Exception as e:
-        print(f"[!] Error occurred: {e}")
-        time.sleep(5)
-        continue
-
-print(f"질문 수: {len(questions)}")
-
-# 질문 txt로 저장
-with open("questions.txt", "w", encoding="utf-8") as f:
-    f.write("\n".join(questions))
-print(f"✅ 질문 {len(questions)}개를 questions.txt 파일로 저장했습니다.")
-
-# SFT 데이터 생성
-sft_items = []
-
-for i in range(0, len(questions), 5):
-    batch = questions[i : i + 5]  # 최대 5개씩 처리
-    print(f"input data: {batch}")
-
-    try:
+        # Step 1: 5개 데이터 생성 요청
         gen_msg = [
             {"role": "system", "content": make_SFT_prompt},
-            {"role": "user", "content": "\n".join(batch)},
+            {"role": "user", "content": "조세호 말투 데이터를 포맷에 맞게 5개 만들어줘"}
         ]
-        gen_response = sft_generator.chat.completions.create(
-            model="gpt-4o-mini",
+        gen_response = generater.chat.completions.create(
+            model='gpt-4o-mini',
             messages=gen_msg
         )
-        args = json.loads(gen_response.choices[0].message.content)
-        generated_items = args
-        print(f"gg {generated_items}")
+        generated_text = gen_response.choices[0].message.content
 
-        # 검수 루프
-        while True:
+        # Step 2: JSON 파싱
+        try:
+            new_items = json.loads(generated_text)
+        except Exception as e:
+            print(f"[!] JSON 파싱 오류: {e}")
+            continue
+
+        # Step 3: 중복 제거
+        valid_items = filter_duplicates(existing_questions, new_items)
+        if not valid_items:
+            print("[!] 5개 모두 중복 질문이라 건너뜀")
+            continue
+
+        # Step 4: 피드백 기반 검수 (최대 5회 반복)
+        for _ in range(5):
+            check_input = json.dumps(valid_items, ensure_ascii=False, indent=2)
             check_msg = [
                 {"role": "system", "content": SFT_check_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        json.dumps(generated_items, ensure_ascii=False, indent=2)
-                        + "\n위 데이터가 조세호 스타일로 생성되었는지 확인해줘. 문제 없으면 '만족스러운 답변입니다.'라고 말해줘."
-                    ),
-                },
+                {"role": "user", "content": f"{check_input}\n\n위 데이터가 조세호 말투와 추임새, 습관을 잘 반영하는지 판단해주세요. 문제 없으면 '만족스러운 답변입니다.'라고 답변해주세요."}
             ]
-
-            check_response = sft_checker.chat.completions.create(
-                model="gpt-4o-mini",
+            check_response = checker.chat.completions.create(
+                model='gpt-4o-mini',
                 messages=check_msg
             )
-            feedback = check_response.choices[0].message.content
+            feedback_text = check_response.choices[0].message.content
 
-            if "만족스러운 답변" in feedback:
-                sft_items.extend(generated_items)
-                print(
-                    f"    ↳ Accepted: {len(sft_items):>3} / {num_of_data} (batch {i//5 + 1})"
-                )
+            if "만족스러운 답변" in feedback_text:
+                results.extend(valid_items)
+                for item in valid_items:
+                    for msg in item["messages"]:
+                        if msg["role"] == "user":
+                            existing_questions.add(msg["content"].strip())
+                print(f"[✓] {len(results)} / {collect_num} accepted")
                 break
             else:
-                # 피드백 반영 재생성
+                # 피드백 반영 요청
                 gen_msg = [
                     {"role": "system", "content": make_SFT_prompt},
-                    {
-                        "role": "user",
-                        "content": feedback + "\n위 피드백을 반영해서 답변을 수정해줘",
-                    },
+                    {"role": "user", "content": feedback_text + "\n위 피드백을 반영해서 다시 5개만 생성해줘"}
                 ]
-                gen_response = sft_generator.chat.completions.create(
-                    model="gpt-4o-mini",
+                gen_response = generater.chat.completions.create(
+                    model='gpt-4o-mini',
                     messages=gen_msg
                 )
-                print(gen_response.choices[0].message.content)
-                args = json.loads(gen_response.choices[0].message.content)
-                generated_items = args
+                generated_text = gen_response.choices[0].message.content
+
+                try:
+                    new_items = json.loads(generated_text)
+                    valid_items = filter_duplicates(existing_questions, new_items)
+                    if not valid_items:
+                        print("[!] 피드백 반영본도 중복 질문이라 건너뜀")
+                        break
+                except Exception as e:
+                    print(f"[!] 피드백 반영본 JSON 파싱 실패: {e}")
+                    break
 
         time.sleep(1.5)
 
     except Exception as e:
-        print(f"[!] Error while creating SFT data: {e}")
+        print(f"[!] 오류 발생: {e}")
         time.sleep(5)
         continue
 
-with open("create_SFT_data.jsonl", "w", encoding="utf-8") as f:
-    for item in sft_items:
+# 7. 결과 저장 (.jsonl 형식: 한 줄에 하나의 JSON)
+with open("test_checked_dataset.jsonl", "w", encoding="utf-8") as f:
+    for item in results:
         f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-# SFT 데이터 생성 끝
-print("✅ Final dataset saved to create_SFT_data.jsonl")
+print("✅ Final dataset saved to checked_dataset.jsonl")
 
-# --------------------
-# DPO 데이터 생성
-dpo_items = []
-
-# SFT assistant 답변 추출
 assistant_texts = []
-for it in sft_items:
-    print(f"it: {it}")
+for it in results:
     try:
-        print(it["messages"][2]["content"])
         assistant_texts.append(it["messages"][2]["content"].strip())
     except StopIteration:
         continue  # 구조가 예상과 다르면 skip
 
 print(f"assistant_texts 길이: {len(assistant_texts)}")
 
+dpo_items = []
+
 for i in range(0, len(assistant_texts), 5):
     batch = assistant_texts[i : i + 5]
-    print(f"dpo input: {batch}")
 
-    # ---------------------- 생성 ----------------------
     gen_msgs = [
         {"role": "system", "content": make_DPO_prompt},
         {"role": "user", "content": "\n".join(batch)},  # 5개 문장 전달
     ]
-    resp = dpo_generator.chat.completions.create(
+    resp = dpo_generater.chat.completions.create(
         model='gpt-4o-mini',
         messages=gen_msgs
     )
     dpo_line = resp.choices[0].message.content.strip()
-    print(f"dpo_line: {dpo_line}")
 
-    # ---------------------- 검수 & 피드백 루프 ----------------------
     while True:
         check_msg = [
             {"role": "system", "content": DPO_check_prompt},
@@ -197,9 +173,9 @@ for i in range(0, len(assistant_texts), 5):
             # 피드백 기반 재생성
             feedback_msgs = [
                 {"role": "system", "content": make_DPO_prompt},
-                {"role": "user", "content": judge + "\n위 피드백을 반영해서 다시 작성해줘"},
+                {"role": "user", "content": dpo_line + "\n" + judge + "\n위 피드백을 반영해서 다시 작성해줘"},
             ]
-            resp = dpo_generator.chat.completions.create(
+            resp = dpo_generater.chat.completions.create(
                 model='gpt-4o-mini',
                 messages=feedback_msgs
             )
