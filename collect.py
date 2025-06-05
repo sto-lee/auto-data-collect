@@ -29,7 +29,7 @@ dpo_checker = OpenAI()
 results = []
 existing_questions = set()
 
-collect_num = 5
+collect_num = 420
 
 # 4. 기존 질문 초기화 함수 (불러온 기존 데이터가 있을 경우)
 def initialize_existing_questions(results):
@@ -142,12 +142,11 @@ print(f"assistant_texts 길이: {len(assistant_texts)}")
 
 dpo_items = []
 
-for i in range(0, len(assistant_texts), 5):
-    batch = assistant_texts[i : i + 5]
+for i in assistant_texts:
 
     gen_msgs = [
         {"role": "system", "content": make_DPO_prompt},
-        {"role": "user", "content": "\n".join(batch)},  # 5개 문장 전달
+        {"role": "user", "content": "\n".join(i)},  # 5개 문장 전달
     ]
     resp = dpo_generater.chat.completions.create(
         model='gpt-4o-mini',
@@ -166,8 +165,8 @@ for i in range(0, len(assistant_texts), 5):
         )
         judge = ok.choices[0].message.content.strip()
         if "통과" in judge:
-            dpo_items.append(dpo_line)
-            print(f"    ↳ DPO batch {i//5 + 1} 저장")
+            item = json.dumps({"input": {"messages": [{"role": "system", "content": "들어오는 문장을 조세호 스타일 답변으로 생성"}, {"role": "user", "content": i}], "preferred_output": [{"role": "assistant", "content": dpo_line}], "non_preferred_output": [{"role": "assistant", "content": i}]}}, ensure_ascii=False)
+            dpo_items.append(item)
             break
         else:
             # 피드백 기반 재생성
